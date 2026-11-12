@@ -1,14 +1,37 @@
 package main
 
-import "fmt"
+import (
+	"encoding/base64"
+	"fmt"
+
+	"github.com/Sid-80/Redis-go/store"
+	"github.com/Sid-80/Redis-go/store/kv"
+)
 
 func main() {
-	st := NewStore()
-	st.Set("Key1", "Val1")
+	plain := kv.NewStore(20)
+	logger := NewLoggingMiddleware(plain)
+	metrics := NewMetricMiddleware(logger)
 
-	fmt.Println(st.Get("Key1"))
+	encrypted, err := SetKeyWithEncryptionStore(metrics, "a", "Its all set without ttl")
 
-	st.Del("Key1")
-	fmt.Println(st.Get("Key1"))
+	if err != nil {
+		fmt.Println((err))
+		return
+	}
 
+	fmt.Println(encrypted)
+
+	metrics.Report()
+}
+
+func SetKeyWithEncryptionStore(s store.Storer, key, val string) (string, error) {
+	encoded := base64.StdEncoding.EncodeToString([]byte(val))
+
+	if err := s.Set(key, encoded); err != nil {
+		fmt.Println("Error")
+		return "", err
+	}
+
+	return s.Get(key)
 }

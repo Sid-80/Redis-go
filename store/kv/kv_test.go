@@ -1,12 +1,16 @@
-package main
+package kv
 
 import (
+	"errors"
+	"fmt"
 	"reflect"
 	"testing"
+
+	"github.com/Sid-80/Redis-go/store"
 )
 
 func TestKeys_ReturnsAllKeysSorted(t *testing.T) {
-	store := NewStore()
+	store := NewStore(3)
 	store.Set("charlie", "3")
 	store.Set("alpha", "1")
 	store.Set("bravo", "2")
@@ -20,8 +24,17 @@ func TestKeys_ReturnsAllKeysSorted(t *testing.T) {
 	}
 }
 
+func TestGetSet_EmptyKeys(t *testing.T) {
+	store2 := NewStore(3)
+
+	if _, err := store2.Get(""); err == nil || !errors.Is(err, store.ErrEmptyKey) {
+		t.Error("Get() failed!!")
+	}
+
+}
+
 func TestKeys_EmptyStore(t *testing.T) {
-	store := NewStore()
+	store := NewStore(3)
 	got := store.Keys()
 	if len(got) != 0 {
 		t.Errorf("Opps!! Its length is not 0 !! \n len of Got: %v", len(got))
@@ -29,18 +42,20 @@ func TestKeys_EmptyStore(t *testing.T) {
 }
 
 func TestGetSet_RoundTrip(t *testing.T) {
-	store := NewStore()
-	store.Set("Hello", "World")
+	store2 := NewStore(3)
+	store2.Set("Hello", "World")
 
-	val, err := store.Get("Hello")
+	val, err := store2.Get("Hello")
 
 	if val != "World" || err != nil {
 		t.Errorf("Invalid value while Get and Set \n Value: %v", val)
 	}
 
-	_, err2 := store.Get("h2")
+	_, err2 := store2.Get("h2")
 
-	if err2 != nil {
+	fmt.Println(err2)
+
+	if err2 != store.ErrKeyDoesNotExist {
 		t.Error("Issue in Get function its returing true for value which is not Set")
 	}
 }
@@ -60,14 +75,14 @@ func TestDelete(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			store := NewStore()
+			store := NewStore(3)
 			for k, v := range tc.setup {
 				store.Set(k, v)
 			}
 
 			store.Del(tc.deleteKey)
 
-			if got := store.len(); got != tc.wantLen {
+			if got := store.Len(); got != tc.wantLen {
 				t.Errorf("after Delete (%q): len(): %d, want: %d", tc.deleteKey, got, tc.wantLen)
 			}
 
