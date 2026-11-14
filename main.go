@@ -1,37 +1,28 @@
 package main
 
 import (
-	"encoding/base64"
 	"fmt"
 
-	"github.com/Sid-80/Redis-go/store"
 	"github.com/Sid-80/Redis-go/store/kv"
 )
 
 func main() {
-	plain := kv.NewStore(20)
-	logger := NewLoggingMiddleware(plain)
-	metrics := NewMetricMiddleware(logger)
 
-	encrypted, err := SetKeyWithEncryptionStore(metrics, "a", "Its all set without ttl")
+	s := kv.NewStore(20)
 
-	if err != nil {
-		fmt.Println((err))
-		return
+	s.Set("pageViews", "0")
+
+	const hits = 1000
+	cmds := make([]Command, hits)
+
+	for i := range cmds {
+		cmds[i] = Command{Op: "INCR", Key: "pageViews"}
 	}
 
-	fmt.Println(encrypted)
+	restartsOnBoot(s, cmds)
 
-	metrics.Report()
-}
+	got, _ := s.Get("pageViews")
 
-func SetKeyWithEncryptionStore(s store.Storer, key, val string) (string, error) {
-	encoded := base64.StdEncoding.EncodeToString([]byte(val))
-
-	if err := s.Set(key, encoded); err != nil {
-		fmt.Println("Error")
-		return "", err
-	}
-
-	return s.Get(key)
+	fmt.Println("Got: ", got)
+	fmt.Println("Req: ", hits)
 }
