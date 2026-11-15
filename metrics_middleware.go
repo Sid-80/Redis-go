@@ -2,92 +2,135 @@ package main
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/Sid-80/Redis-go/store"
 )
 
+// Compile-time check that *MetricMiddleware implements store.Storer.
+var _ store.Storer = (*MetricMiddleware)(nil)
+
+// MetricMiddleware wraps any Storer and counts calls, misses and latency.
+// The counters are protected by mu so it can be used from many goroutines.
 type MetricMiddleware struct {
 	inner store.Storer
 
-	getCalls int
-	setCalls int
-	delCalls int
-	lenCalls int
+	mu sync.Mutex
 
-	getMisses int
+	getCalls  int
+	setCalls  int
+	delCalls  int
+	lenCalls  int
+	keysCalls int
+	incrCalls int
 
-	totalGetLatency time.Duration
-	totalSetLatency time.Duration
+	getMisses  int
+	incrErrors int
+
+	totalGetLatency  time.Duration
+	totalSetLatency  time.Duration
+	totalIncrLatency time.Duration
 }
 
 func NewMetricMiddleware(inner store.Storer) *MetricMiddleware {
-	return &MetricMiddleware{
-		inner:     inner,
-		getCalls:  0,
-		setCalls:  0,
-		delCalls:  0,
-		lenCalls:  0,
-		getMisses: 0,
-	}
+	return &MetricMiddleware{inner: inner}
 }
+
+// The call to the inner store happens outside the lock, so a slow store
+// does not stop other goroutines from recording their metrics.
 
 func (m *MetricMiddleware) Get(key string) (string, error) {
 	start := time.Now()
-	m.getCalls++
 	val, err := m.inner.Get(key)
+	elapsed := time.Since(start)
 
+	m.mu.Lock()
+	m.getCalls++
 	if err != nil {
 		m.getMisses++
 	}
-
-	duration := time.Since(start)
-	m.totalGetLatency += duration
+	m.totalGetLatency += elapsed
+	m.mu.Unlock()
 
 	return val, err
 }
 
 func (m *MetricMiddleware) Set(key string, value string) error {
 	start := time.Now()
-
-	m.setCalls++
-
 	err := m.inner.Set(key, value)
+	elapsed := time.Since(start)
 
-	duration := time.Since(start)
-	m.totalSetLatency += duration
+	m.mu.Lock()
+	m.setCalls++
+	m.totalSetLatency += elapsed
+	m.mu.Unlock()
 
 	return err
 }
 
 func (m *MetricMiddleware) Del(key string) {
-	m.delCalls++
 	m.inner.Del(key)
+
+	m.mu.Lock()
+	m.delCalls++
+	m.mu.Unlock()
 }
 
 func (m *MetricMiddleware) Len() int {
+	got := m.inner.Len()
+
+	m.mu.Lock()
 	m.lenCalls++
-	return m.inner.Len()
+	m.mu.Unlock()
+
+	return got
 }
 
 func (m *MetricMiddleware) Keys() []string {
-	return m.inner.Keys()
+	got := m.inner.Keys()
+
+	m.mu.Lock()
+	m.keysCalls++
+	m.mu.Unlock()
+
+	return got
+}
+
+func (m *MetricMiddleware) INCR(key string) (int, error) {
+	start := time.Now()
+	got, err := m.inner.INCR(key)
+	elapsed := time.Since(start)
+
+	m.mu.Lock()
+	m.incrCalls++
+	if err != nil {
+		m.incrErrors++
+	}
+	m.totalIncrLatency += elapsed
+	m.mu.Unlock()
+
+	return got, err
 }
 
 func (m *MetricMiddleware) Report() {
-	fmt.Printf("GET calls: %d. (missed %d)\n", m.getCalls, m.getMisses)
-	fmt.Printf("SET calls: %d.\n", m.setCalls)
-	fmt.Printf("DEL calls: %d.\n", m.delCalls)
-	fmt.Printf("LEN calls: %d.\n", m.lenCalls)
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
-	if m.getCalls > 0 {
-		avg := m.totalGetLatency / time.Duration(m.getCalls)
-		fmt.Printf("avg GET latency: %v.\n", avg)
+	fmt.Printf("GET  calls: %d (missed %d)\n", m.getCalls, m.getMisses)
+	fmt.Printf("SET  calls: %d\n", m.setCalls)
+	fmt.Printf("INCR calls: %d (errors %d)\n", m.incrCalls, m.incrErrors)
+	fmt.Printf("DEL  calls: %d\n", m.delCalls)
+	fmt.Printf("LEN  calls: %d\n", m.lenCalls)
+	fmt.Printf("KEYS calls: %d\n", m.keysCalls)
+
+	printAvg("GET", m.totalGetLatency, m.getCalls)
+	printAvg("SET", m.totalSetLatency, m.setCalls)
+	printAvg("INCR", m.totalIncrLatency, m.incrCalls)
+}
+
+func printAvg(op string, total time.Duration, calls int) {
+	if calls > 0 {
+		fmt.Printf("avg %s latency: %v\n", op, total/time.Duration(calls))
 	}
-
-	if m.setCalls > 0 {
-		avg := m.totalSetLatency / time.Duration(m.setCalls)
-		fmt.Printf("avg SET latency: %v.\n", avg)
-	}
-
 }

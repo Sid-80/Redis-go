@@ -1,7 +1,7 @@
 package main
 
 import (
-	"log"
+	"fmt"
 	"sync"
 
 	"github.com/Sid-80/Redis-go/store"
@@ -13,27 +13,49 @@ type Command struct {
 	Value string
 }
 
-func dispatch(s store.Storer, c Command) {
+// dispatch runs a single command against s. Logging is left to LoggingMiddleware.
+func dispatch(s store.Storer, c Command) error {
 	switch c.Op {
 	case "SET":
-		log.Printf("SET Key: %s", c.Key)
-		s.Set(c.Key, c.Value)
+		return s.Set(c.Key, c.Value)
 	case "GET":
-		s.Get(c.Key)
+		_, err := s.Get(c.Key)
+		return err
+	case "DEL":
+		s.Del(c.Key)
+		return nil
 	case "INCR":
-		s.INCR(c.Key)
+		_, err := s.INCR(c.Key)
+		return err
+	default:
+		return fmt.Errorf("unknown op: %q", c.Op)
 	}
 }
 
-func restartsOnBoot(s store.Storer, cmds []Command) {
+// restartsOnBoot replays cmds concurrently and returns every error that occurred.
+func restartsOnBoot(s store.Storer, cmds []Command) []error {
 	var wg sync.WaitGroup
+	errs := make(chan error, len(cmds))
+
 	for _, c := range cmds {
 		wg.Add(1)
 		go func() {
-			dispatch(s, c)
-			wg.Done()
+			defer wg.Done()
+			if err := dispatch(s, c); err != nil {
+				errs <- fmt.Errorf("%s %q: %w", c.Op, c.Key, err)
+			}
 		}()
 	}
 
-	wg.Wait()
+	// Close errs once every worker is done, so the range loop below can finish.
+	go func() {
+		wg.Wait()
+		close(errs)
+	}()
+
+	var all []error
+	for err := range errs {
+		all = append(all, err)
+	}
+	return all
 }

@@ -1,25 +1,27 @@
 package kv
 
 import (
-	"errors"
 	"fmt"
 	"sort"
 	"strconv"
 	"sync"
-	"time"
 
 	"github.com/Sid-80/Redis-go/store"
 )
 
+// Compile-time check that *Store implements store.Storer.
+var _ store.Storer = (*Store)(nil)
+
+// Store is an in-memory key/value store that is safe for concurrent use.
+//
+// Methods that hold the lock must touch s.data directly and never call
+// another locking method, because sync.RWMutex is not re-entrant.
 type Store struct {
-	data    map[string]string
-	maxSize int //0 = unlimited
 	mu      sync.RWMutex
+	data    map[string]string
+	maxSize int // 0 = unlimited
 }
 
-var ErrMaxSize = errors.New("You have reached max limit to store keys!!")
-
-// constructor function
 func NewStore(maxSize int) *Store {
 	return &Store{
 		data:    make(map[string]string),
@@ -28,76 +30,62 @@ func NewStore(maxSize int) *Store {
 }
 
 func (s *Store) Clone() *Store {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	cp := &Store{
 		data:    make(map[string]string, len(s.data)),
 		maxSize: s.maxSize,
 	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	for k, v := range s.data {
 		cp.data[k] = v
 	}
-
 	return cp
 }
 
-// this function means attaching something to struct i.e. Store.Get("key1")
-func (s *Store) Get(Key string) (string, error) {
-	if Key == "" {
+func (s *Store) Get(key string) (string, error) {
+	if key == "" {
 		return "", store.ErrEmptyKey
 	}
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	val, exists := s.data[Key]
-
+	val, exists := s.data[key]
 	if !exists {
 		return "", store.ErrKeyDoesNotExist
 	}
-
 	return val, nil
 }
 
-func (s *Store) Set(Key string, Value string) error {
-	if Key == "" {
+func (s *Store) Set(key string, value string) error {
+	if key == "" {
 		return store.ErrEmptyKey
 	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	_, err := s.data[Key]
-
-	if s.maxSize > 0 && len(s.data) >= s.maxSize && (!err) {
-		return ErrMaxSize
+	// Overwriting an existing key is always allowed; only new keys count towards maxSize.
+	_, exists := s.data[key]
+	if s.maxSize > 0 && len(s.data) >= s.maxSize && !exists {
+		return store.ErrStoreFull
 	}
 
-	s.data[Key] = Value
+	s.data[key] = value
 	return nil
 }
 
-func (s *Store) Del(Key string) {
+func (s *Store) Del(key string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.data, Key)
-	return
+	delete(s.data, key)
 }
 
 func (s *Store) Keys() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-
-	keys := make([]string, 0, len(s.data))
-
-	for key, _ := range s.data {
-		keys = append(keys, key)
-	}
-
-	sort.Strings(keys)
-
-	return keys
+	return sortedKeys(s.data)
 }
 
 func (s *Store) Len() int {
@@ -106,39 +94,41 @@ func (s *Store) Len() int {
 	return len(s.data)
 }
 
+// Rename moves the value at oldKey to newKey. It does nothing if oldKey is missing.
 func (s *Store) Rename(oldKey string, newKey string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	val, _ := s.data[oldKey]
-
-	if val != "" {
-		delete(s.data, oldKey)
-		s.data[newKey] = val
+	val, ok := s.data[oldKey]
+	if !ok {
+		return
 	}
+	delete(s.data, oldKey)
+	s.data[newKey] = val
 }
 
-func (s *Store) Pop(key string) (string, bool) {
-	keys := s.Keys()
-
-	if len(keys) > 0 {
-		return "", false
-	}
-
+// Pop removes and returns the value of the alphabetically last key.
+// It returns false if the store is empty.
+func (s *Store) Pop() (string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	lastKey := keys[len(keys)]
+	if len(s.data) == 0 {
+		return "", false
+	}
 
-	val, _ := s.data[lastKey]
+	keys := sortedKeys(s.data)
+	lastKey := keys[len(keys)-1]
 
+	val := s.data[lastKey]
 	delete(s.data, lastKey)
-
 	return val, true
 }
 
-func (s *Store) INCR(Key string) (int, error) {
-	if Key == "" {
+// INCR adds 1 to the integer stored at key (a missing key starts at 0)
+// and returns the new value.
+func (s *Store) INCR(key string) (int, error) {
+	if key == "" {
 		return 0, store.ErrEmptyKey
 	}
 
@@ -146,18 +136,28 @@ func (s *Store) INCR(Key string) (int, error) {
 	defer s.mu.Unlock()
 
 	current := 0
-	if val, ok := s.data[Key]; ok {
+	if val, ok := s.data[key]; ok {
 		v, err := strconv.Atoi(val)
 		if err != nil {
-			return 0, fmt.Errorf("INCR Error: %q", err)
+			return 0, fmt.Errorf("INCR %q: value is not an integer: %w", key, err)
 		}
 		current = v
+	} else if s.maxSize > 0 && len(s.data) >= s.maxSize {
+		// INCR on a missing key creates it, so it must respect maxSize like Set.
+		return 0, store.ErrStoreFull
 	}
 
 	current++
-	time.Sleep(time.Microsecond)
-
-	s.data[Key] = strconv.Itoa(current)
-
+	s.data[key] = strconv.Itoa(current)
 	return current, nil
+}
+
+// sortedKeys must be called with the lock held.
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
